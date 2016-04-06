@@ -1,0 +1,422 @@
+/*
+ * Copyright 2014 Open Networking Laboratory
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package com.verizon.onosapp;
+
+//import org.apache.felix.scr.annotations.*;
+import org.apache.felix.scr.annotations.*;
+import org.json.simple.JSONArray;
+import org.onosproject.net.device.DeviceEvent;
+import org.onosproject.net.device.DeviceListener;
+import org.onosproject.net.device.DeviceService;
+import org.onosproject.net.host.HostEvent;
+import org.onosproject.net.host.HostListener;
+import org.onosproject.net.host.HostService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+
+import java.io.*;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.util.HashMap;
+import java.util.StringTokenizer;
+
+
+import java.net.MalformedURLException;
+
+
+import org.json.simple.JSONObject;
+import org.json.simple.parser.ParseException;
+import org.json.simple.parser.JSONParser;
+
+/**
+ * Skeletal ONOS application component.
+ */
+@Component(immediate = true)
+public class AppComponent {
+    
+    static boolean devicecreated = false;
+    private final Logger log = LoggerFactory.getLogger(getClass());
+
+    private DeviceListener deviceListener;
+    private  HostListener hostListener;
+
+    @Reference(cardinality = ReferenceCardinality.MANDATORY_UNARY)
+    protected DeviceService deviceService;
+
+    @Reference(cardinality = ReferenceCardinality.MANDATORY_UNARY)
+    protected HostService hostService;
+
+    private HashMap<String,String> appConfig = new HashMap<String, String>();
+    @Activate
+    protected void activate() {
+
+        deviceListener = new InnerDeviceListener();
+        deviceService.addListener(deviceListener);
+
+        hostListener= new InnerHostListener();
+        hostService.addListener(hostListener);
+
+        appConfig.put("keystone.url", "http://10.76.190.80:5000/v2.0/tokens");
+        appConfig.put("tacker.url", "http://10.76.190.80:8888/v1.0");
+        appConfig.put("tacker.domain", "demo");
+        appConfig.put("tacker.username","admin");
+        appConfig.put("tacker.password","devstack");
+
+        appConfig.put("keystone.url.tenants", "http://10.76.190.80:5000/v2.0/tenants");
+        appConfig.put("service.user", "user1");
+        appConfig.put("service.password", "devstack");
+        appConfig.put("service.domain", "service");
+
+        appConfig.put("compute.url", "http://10.76.190.80:8774/v2.1/");
+
+        log.info("Reading config file");
+        readAppConfig();
+
+
+        log.info("Started");
+    }
+
+    @Deactivate
+    protected void deactivate() {
+        deviceService.removeListener(deviceListener);
+        log.info("Stopped");
+    }
+
+    // Triggers driver setup when a device is (re)detected.
+    private class InnerDeviceListener implements DeviceListener {
+        @Override
+        public void event(DeviceEvent event) {
+            log.info(event.toString());
+            switch (event.type()) {
+                case DEVICE_ADDED:
+                    log.info("DEVICE Added, getting Tacker Token");
+                    log.debug("Connecting to:" + appConfig.get("keystone.url"));
+                    getToken("tacker");
+                    getVNFDS();
+                    createVNF();
+
+                    break;
+                case DEVICE_AVAILABILITY_CHANGED:
+                case PORT_STATS_UPDATED:
+                    log.info("DEVICE Availablity Changed, getting Tacker Token");
+                    log.info("Connecting to:" + appConfig.get("keystone.url"));
+                    getToken("tacker");
+                    getVNFDS();
+                    if (!devicecreated)
+                    {
+                         log.info("Creating Device");
+                         createVNF();
+                         devicecreated = true;
+                    }
+                    break;
+                // TODO other cases
+                case DEVICE_UPDATED:
+                    log.info("DEVICE Update, getting Tacker Token");
+                    getToken("tacker");
+                    getVNFDS();
+                   // createVNF();
+                    break;
+                case DEVICE_REMOVED:
+                    break;
+                case DEVICE_SUSPENDED:
+                    break;
+                case PORT_ADDED:
+                    break;
+                case PORT_UPDATED:
+                    break;
+                case PORT_REMOVED:
+                    break;
+                default:
+                    break;
+            }
+        }
+        private void  getToken(String tokenType)
+        {
+            try {
+
+                //URL url = new URL("http://172.16.197.132:5000/v2.0/tokens");
+                log.info("Connecting to:" + appConfig.get("keystone.url"));
+                URL url = new URL(appConfig.get("keystone.url"));
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setDoOutput(true);
+                conn.setRequestMethod("POST");
+                conn.setRequestProperty("Content-Type", "application/json");
+                String input =
+                        "{\n"+
+                                "    \"auth\": {\n" +
+                                "       \"passwordCredentials\": {\n" +
+                                "           \"password\": \""+ appConfig.get(tokenType+".password")+"\",\n" +
+                                "           \"username\": \""+appConfig.get(tokenType+".username")+"\"\n" +
+                                "       },\n" +
+                                "       \"tenantName\": \""+appConfig.get(tokenType+".domain")+"\"\n" +
+                                "   }\n" +
+                                "}";
+                log.info(input);
+                OutputStream os = conn.getOutputStream();
+                os.write(input.getBytes());
+                os.flush();
+
+                BufferedReader br = new BufferedReader(new InputStreamReader(
+                        (conn.getInputStream())));
+
+                String output;
+                StringBuffer buf = new StringBuffer();
+                while ((output = br.readLine()) != null) {
+                    buf.append(output);
+                }
+                JSONParser parser = new JSONParser();
+                JSONObject obj = (JSONObject)parser.parse(buf.toString());
+                HashMap map = (HashMap)((HashMap)obj.get("access")).get("token");
+                appConfig.put(tokenType+".token",(String)map.get("id"));
+
+                log.info((String) map.get("id"));
+                conn.disconnect();
+
+            } catch (MalformedURLException e) {
+
+                log.error("Malformed", e);
+
+            } catch (IOException e) {
+
+                log.error ("IOException", e);
+            }
+            catch (ParseException e) {
+                log.error ("ParseException", e);
+            }
+
+
+        }
+
+    }
+    private void getVNFDS()
+    {
+        try {
+
+            URL url = new URL(appConfig.get("tacker.url")+"/vnfds.json");
+            log.info("Connecting to:" + url.toString());
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setDoOutput(true);
+            conn.setRequestMethod("GET");
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setRequestProperty("User-Agent", "python-tackerclient");
+            conn.setRequestProperty("X-Auth-Token", (String) appConfig.get("tacker.token"));
+
+            if (conn.getResponseCode() != 200) {
+                log.error("Failed : HTTP error code : "
+                        + conn.getResponseCode());
+            }
+
+            BufferedReader br = new BufferedReader(new InputStreamReader(
+                    (conn.getInputStream())));
+
+            String output;
+            StringBuffer buf = new StringBuffer();
+            while ((output = br.readLine()) != null) {
+                buf.append(output);
+            }
+            log.info(buf.toString());
+            JSONParser parser = new JSONParser();
+            JSONObject vfnd = (JSONObject)parser.parse(buf.toString());
+            JSONArray vfnds = (JSONArray)vfnd.get("vnfds");
+            JSONObject vfnd1 = (JSONObject)vfnds.get(0);
+            String vnfid = (String) vfnd1.get("id");
+            appConfig.put("vnfid",vnfid);
+            log.info("VNF ID:" + vnfid);
+            conn.disconnect();
+
+        } catch (MalformedURLException e) {
+
+            log.error("Malformed", e);
+
+        } catch (IOException e) {
+
+            log.error ("IOException", e);
+        }
+        catch (ParseException e) {
+            log.error ("ParseException", e);
+        }
+
+    }
+    private void createVNF()
+    {
+        try {
+            URL url = new URL(appConfig.get("tacker.url")+"/vnfs.json");
+            log.info("Connecting to:" + url.toString());
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setDoOutput(true);
+            conn.setRequestMethod("POST");
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setRequestProperty("User-Agent", "python-tackerclient");
+            conn.setRequestProperty("X-Auth-Token", (String) appConfig.get("tacker.token"));
+
+            File tmpFile = File.createTempFile("VzVM","x");
+            String vmname = tmpFile.getName();
+            tmpFile.delete();
+
+
+            String input = "{\"vnf\": {\"attributes\": {\"config\": null, \"param_values\": null}, \"vnfd_id\": \"" + appConfig.get("vnfid") + "\", \"name\": \"" + vmname + "\"}}";
+            log.info(input);
+
+            OutputStream os = conn.getOutputStream();
+            os.write(input.getBytes());
+            os.flush();
+
+            BufferedReader br = new BufferedReader(new InputStreamReader(
+                    (conn.getInputStream())));
+
+            String output;
+            StringBuffer buf = new StringBuffer();
+            while ((output = br.readLine()) != null) {
+                buf.append(output);
+            }
+
+            log.info(buf.toString());
+
+            conn.disconnect();
+
+        } catch (MalformedURLException e) {
+
+            log.error("Malformed", e);
+
+        } catch (IOException e) {
+
+            log.error ("IOException", e);
+        }
+
+    }
+
+
+
+    private class InnerHostListener implements HostListener {
+        @Override
+        public void event(HostEvent event) {
+            log.debug("Host Event: time = {} type = {} event = {}",
+                    event.time(), event.type(), event);
+
+        }
+    }
+    private void readAppConfig()
+    {
+         try {
+            BufferedReader reader = new BufferedReader(new FileReader(new File("tackerconfig.properties")));
+            String line;
+             log.info("Reading input file");
+            while ((line = reader.readLine()) != null)
+            {
+                log.info(line);
+                StringTokenizer st = new StringTokenizer(line,"=");
+                appConfig.put(st.nextToken(),st.nextToken());
+            }
+            reader.close();
+
+        }
+        catch (Exception ex) { log.error("Error reading file",ex);}
+    }
+    private void getCreatedInstanceIP()
+    {
+              getToken("service");
+          try {
+
+                URL url = new URL("http://10.76.190.80:5000/v2.0/tenants");
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setDoOutput(true);
+                conn.setRequestMethod("GET");
+                conn.setRequestProperty("Content-Type", "application/json");
+                conn.setRequestProperty("X-Auth-Token", appConfig.get("service.token"));
+
+                if (conn.getResponseCode() != 200) {
+                log.error("Failed : HTTP error code : "
+                        + conn.getResponseCode());
+                }
+
+                BufferedReader br = new BufferedReader(new InputStreamReader(
+                        (conn.getInputStream())));
+
+                String output;
+                StringBuffer buf = new StringBuffer();
+                while ((output = br.readLine()) != null) {
+                        buf.append(output);
+                }
+                JSONParser parser = new JSONParser();
+                JSONObject obj = (JSONObject)parser.parse(buf.toString());
+                JSONObject object = (JSONObject)((JSONArray)obj.get("tenants")).get(0);
+                String serviceTenantId = (String)object.get("id");
+                log.info("serviceTenantId:"+ serviceTenantId);
+                conn.disconnect();
+
+               url = new URL (appConfig.get("keystone.url.tenants")+ serviceTenantId + "/servers");
+                conn = (HttpURLConnection)url.openConnection();
+                                conn.setDoOutput(true);
+                conn.setRequestMethod("GET");
+                conn.setRequestProperty("Content-Type", "application/json");
+                conn.setRequestProperty("X-Auth-Token", appConfig.get("service.token"));
+
+                if (conn.getResponseCode() != 200) {
+                       log.error("Failed : HTTP error code : "
+                        + conn.getResponseCode());
+                }
+
+                br = new BufferedReader(new InputStreamReader(
+                        (conn.getInputStream())));
+
+                buf = new StringBuffer();
+                while ((output = br.readLine()) != null) {
+                        buf.append(output);
+                }
+                JSONObject servers = (JSONObject)parser.parse(buf.toString());
+                JSONObject firstserver = (JSONObject)((JSONArray)servers.get("servers")).get(0);
+                JSONObject firstLink = (JSONObject)((JSONArray)firstserver.get("links")).get(0);
+                String urlofinstance = (String)firstLink.get("href");
+                log.info(urlofinstance);
+                conn.disconnect();
+                url = new URL (urlofinstance);
+
+                conn = (HttpURLConnection)url.openConnection();
+                conn.setDoOutput(true);
+                conn.setRequestMethod("GET");
+                conn.setRequestProperty("Content-Type", "application/json");
+                conn.setRequestProperty("X-Auth-Token", appConfig.get("service.token"));
+
+                if (conn.getResponseCode() != 200) {
+                       log.error("Failed : HTTP error code : "
+                        + conn.getResponseCode());
+                }
+
+                br = new BufferedReader(new InputStreamReader(
+                        (conn.getInputStream())));
+
+                buf = new StringBuffer();
+                while ((output = br.readLine()) != null) {
+                        buf.append(output);
+                }
+                JSONObject server = (JSONObject)parser.parse(buf.toString());
+                server = (JSONObject)server.get("server");
+                JSONObject addresses = (JSONObject)server.get("addresses");
+                JSONArray netmgmt = (JSONArray)addresses.get("net_mgmt");
+                JSONObject fnet_mgmt = (JSONObject) netmgmt.get(0);
+                log.info((String)fnet_mgmt.get("addr"));
+
+          } catch (MalformedURLException e) {
+                e.printStackTrace();
+          } catch (IOException e) {
+                e.printStackTrace();
+          }
+         catch (ParseException e) {
+                e.printStackTrace();
+         }
+      }
+}
